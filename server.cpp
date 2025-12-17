@@ -1,6 +1,6 @@
 /*
 Server:
-  wait for client
+  wait for client 
   client connects
   start thread
     loop:
@@ -16,8 +16,56 @@ Server:
 #include <unistd.h>
 #include <cstring>
 #include <iostream>
+#include <thread>
+#include <vector>
+#include <cstdint>
+#include <errno.h>
+
 
 #define SERVER_PORT 7777 //provisional port chosen
+
+
+void handle_client(int client_fd){
+
+  std::cout << "Client thread started (fd=" << client_fd << ")\n";
+
+  std::string pending_parsing;// inside this string all the input from user will be stored
+
+  char buffer[1024]; //created a buffer where message is going to be stored
+
+  while (true){
+
+    //recv(socket, buffer*, length, flags) where message is saved in buffer and it returns the length of the message
+    int bytes = recv(client_fd, buffer, sizeof(buffer), 0);
+    
+    if (bytes > 0){//chars received
+      pending_parsing.append(buffer, bytes); //add input to unparsed input string
+      if (pending_parsing.size() > 64 * 1024){break;} //client wll be kicked out if sendind too many chars without enter
+
+      size_t nl_pos;
+      while ((nl_pos = pending_parsing.find('\n')) != std::string::npos){//while \n is found extract that sentence into its own string
+        
+        //Move one sentence from std::string pending_parsing into std::string sentence.
+        std::string sentence = pending_parsing.substr(0, nl_pos);
+        if (!sentence.empty() && sentence.back() == '\r'){ sentence.pop_back();} //handle window new line cases (\r\n)
+        pending_parsing.erase(0, nl_pos+1);
+        std::cout << "Received the sentence: " << sentence << "\n";
+
+      }
+
+    }
+    else if (bytes == 0){//recv returns 0 when client is disconnected
+      std::cout << "Client disconnected\n";
+      break; //client discconected: break loop
+    }
+    else{//recv returns -1 when unsuccesful
+      std::cerr << "recv() error\n";
+      break;
+  }
+}
+  close(client_fd);
+}
+
 
 int main(){
 
@@ -60,12 +108,10 @@ std::cout << "Listening on port " << SERVER_PORT << "\n";
     std::cerr << "Failed to accept\n";
     continue; //continue bc one failed connection doesnt mean whole server is broken
     }
-    //TODO: Hand it to thread
     //client connected
     std::cout << "Accepted a client!\n";
+    std::thread(handle_client, client_fd).detach();
 
-
-    close(client_fd);
   }
 
 close(fd);//close socket
