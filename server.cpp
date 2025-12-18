@@ -20,7 +20,9 @@ Server:
 #include <vector>
 #include <cstdint>
 #include <errno.h>
+#include "json.hpp"
 
+using json = nlohmann::json;
 
 #define SERVER_PORT 7777 //provisional port chosen
 
@@ -50,6 +52,44 @@ void handle_client(int client_fd){
         if (!sentence.empty() && sentence.back() == '\r'){ sentence.pop_back();} //handle window new line cases (\r\n)
         pending_parsing.erase(0, nl_pos+1);
         std::cout << "Received the sentence: " << sentence << "\n";
+
+        try{
+          json msg = json::parse(sentence);
+
+          std::string type = msg.value("type","");
+          int seq = msg.value("seq", 0);
+          
+          if(type == "hello"){
+              json reply = {
+                {"type", "helloBack"},
+                {"seq", seq}
+              };
+              std::string output = reply.dump() + "\n"; //dump is a json function that dumps the json into a string format
+              send(client_fd, output.c_str(), output.size(), 0); //send(socket, *buffer, length, flags) where socket is the one who it will be sent and buffer has the message
+          } 
+
+          else if (type == "ping"){
+              json reply = {
+                {"type", "pong"},
+                {"seq", seq}                
+              };
+              std::string output = reply.dump() + "\n";
+              send(client_fd, output.c_str(), output.size(), 0);
+          }
+
+          else{
+            json reply = {
+              {"type","error"},
+              {"seq", seq}
+            };
+            std::string output = reply.dump() + "\n";
+            send(client_fd, output.c_str(), output.size(), 0);
+          }
+          
+        }
+        catch(const json::parse_error& e){
+            std::cerr << "Invalid JSON\n";
+        }
 
       }
 
