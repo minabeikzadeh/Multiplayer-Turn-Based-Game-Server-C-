@@ -1,14 +1,3 @@
-/*
-Server:
-  wait for client 
-  client connects
-  start thread
-    loop:
-      read message
-      understand message
-      send reply
-      */
-
 //headers to use sockeys in a Linux environment
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -20,16 +9,29 @@ Server:
 #include <vector>
 #include <cstdint>
 #include <errno.h>
+#include <deque>
+#include <mutex>
 #include "json.hpp"
 
 using json = nlohmann::json;
-
 #define SERVER_PORT 7777 //provisional port chosen
 
 
-void handle_client(int client_fd){
+struct Client{
 
-  std::cout << "Client thread started (fd=" << client_fd << ")\n";
+  int fd;
+  std::string id;
+  bool inQueue = false;
+
+};
+
+std::deque<std::shared_ptr<Client>> queue;
+std::mutex matchmaking_mtx;
+int nextSessionID = 1;
+
+void handle_client(std::shared_ptr<Client> client){
+
+  std::cout << "Client thread started (fd=" << client->fd << ")\n";
 
   std::string pending_parsing;// inside this string all the input from user will be stored
 
@@ -38,7 +40,7 @@ void handle_client(int client_fd){
   while (true){
 
     //recv(socket, buffer*, length, flags) where message is saved in buffer and it returns the length of the message
-    int bytes = recv(client_fd, buffer, sizeof(buffer), 0);
+    int bytes = recv(client->fd, buffer, sizeof(buffer), 0);
     
     if (bytes > 0){//chars received
       pending_parsing.append(buffer, bytes); //add input to unparsed input string
@@ -53,11 +55,15 @@ void handle_client(int client_fd){
         pending_parsing.erase(0, nl_pos+1);
         std::cout << "Received the sentence: " << sentence << "\n";
 
+
+
+
         try{
           json msg = json::parse(sentence);
 
           std::string type = msg.value("type","");
           int seq = msg.value("seq", 0);
+          json payload;
           
           if(type == "hello"){
               json reply = {
@@ -65,17 +71,53 @@ void handle_client(int client_fd){
                 {"seq", seq}
               };
               std::string output = reply.dump() + "\n"; //dump is a json function that dumps the json into a string format
-              send(client_fd, output.c_str(), output.size(), 0); //send(socket, *buffer, length, flags) where socket is the one who it will be sent and buffer has the message
+              send(client->fd, output.c_str(), output.size(), 0); //send(socket, *buffer, length, flags) where socket is the one who it will be sent and buffer has the message
           } 
 
-          else if (type == "ping"){
+          else if (type == "join_queue"){
+            std::unique_lock<std::mutex> lock(matchmaking_mtx); //lock
+
+//if client already queued: error
+            if (client->inQueue){
               json reply = {
-                {"type", "pong"},
-                {"seq", seq}                
+                {"type", "error"},
+                {"seq" , seq},
+                {"payload",
+                  {{"code", "ALREADY_QUEUED"}}
+                }
               };
               std::string output = reply.dump() + "\n";
-              send(client_fd, output.c_str(), output.size(), 0);
-          }
+              send(client->fd, output.c_str(), output.size(), 0);
+            }
+
+//if not yet queued: queue
+              else{
+                queue.emplace_back(client);
+                client->inQueue = true;
+
+                if(queue.size() < 2){ //just them in queue: send queue status
+                    json reply = {
+                    {"type", "queue_status"},
+                    {"seq", seq},             
+                    {"payload",
+                      {{"queued", true}}
+                    }
+                    };
+                  std::string output = reply.dump() + "\n";
+                  send(client->fd, output.c_str(), output.size(), 0);
+                }
+
+                /*TODO: 
+                If queue size >= 2:
+
+                pop two clients
+
+                create session id
+
+                send match_found to BOTH*/
+               }
+               std::unique_lock<std::mutex> unlock(matchmaking_mtx);
+        }
 
           else{
             json reply = {
@@ -83,14 +125,12 @@ void handle_client(int client_fd){
               {"seq", seq}
             };
             std::string output = reply.dump() + "\n";
-            send(client_fd, output.c_str(), output.size(), 0);
+            send(client->fd, output.c_str(), output.size(), 0);
           }
-          
         }
         catch(const json::parse_error& e){
             std::cerr << "Invalid JSON\n";
         }
-
       }
 
     }
@@ -103,7 +143,7 @@ void handle_client(int client_fd){
       break;
   }
 }
-  close(client_fd);
+  close(client->fd);
 }
 
 
@@ -148,9 +188,16 @@ std::cout << "Listening on port " << SERVER_PORT << "\n";
     std::cerr << "Failed to accept\n";
     continue; //continue bc one failed connection doesnt mean whole server is broken
     }
+
+    //Use client struct
+    static int nextID = 1;
+    auto client = std::make_shared<Client>();
+    client->fd = client_fd;
+    client->id = "c" + std::to_string(nextID++);
+
     //client connected
     std::cout << "Accepted a client!\n";
-    std::thread(handle_client, client_fd).detach();
+    std::thread(handle_client, client).detach();
 
   }
 
