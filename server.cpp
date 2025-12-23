@@ -6,35 +6,127 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
-#include <vector>
-#include <cstdint>
-#include <errno.h>
 #include <deque>
 #include <mutex>
-#include "json.hpp"
+#include "server.hpp"
 
 using json = nlohmann::json;
 #define SERVER_PORT 7777 //provisional port chosen
 
 
-struct Client{
 
-  int fd;
-  std::string id;
-  bool inQueue = false;
-
-};
+bool send_JSON_line(std::shared_ptr<Client> client, const json& j){
+  std::string output = j.dump() + "\n";
+  return send(client->fd, output.c_str(), output.size(), 0);
+}
 
 std::deque<std::shared_ptr<Client>> queue;
 std::mutex matchmaking_mtx;
 int nextSessionID = 1;
+
+
+void handle_join_queue(std::shared_ptr<Client> client, int seq){
+
+  std::unique_lock<std::mutex> lock(matchmaking_mtx); //lock
+
+//if client already queued: error
+  if (client->inQueue){
+    json reply = {
+      {"type", "error"},
+      {"seq" , seq},
+      {"payload",
+        {{"code", "ALREADY_QUEUED"}}
+      }
+    };
+    send_JSON_line(client, reply);
+  }
+
+//if not yet queued: queue
+  else{
+    queue.emplace_back(client);
+    client->inQueue = true;
+    client->join_seq = seq;
+
+    if(queue.size() < 2){ //just them in queue: send queue status
+      json reply = {
+        {"type", "queue_status"},
+        {"seq", seq},             
+        {"payload",
+          {{"queued", true}}
+        }
+      };
+      send_JSON_line(client, reply);
+    }
+
+    if(queue.size() >= 2){ //two players in queue: send them to session
+      auto p1 = queue.front();
+      queue.pop_front();
+      auto p2 = queue.front();
+      queue.pop_front();
+
+      p1->inQueue = false;
+      p2->inQueue = false;
+
+      std::string session_id = "S"+std::to_string(nextSessionID++);
+
+      json reply1 = {
+        {"type","match_found"},
+        {"seq", p1->join_seq},
+        {"payload", {{"session_id", session_id},{"you_are","P1"}}}
+      };
+      json reply2 = {
+        {"type","match_found"},
+        {"seq", p2->join_seq},
+        {"payload", {{"session_id", session_id},{"you_are","P2"}}}
+      };
+
+      send_JSON_line(p1, reply1);
+      send_JSON_line(p2, reply2);
+    }
+  }
+}
+
+
+
+
+
+void handle_message(std::shared_ptr<Client> client, const json& msg){
+   
+  std::string type = msg.value("type","");
+  int seq = msg.value("seq", 0);
+  json payload;
+          
+  if(type == "hello"){
+    json reply = {
+      {"type", "helloBack"},
+      {"seq", seq}
+    };
+    send_JSON_line(client, reply);
+  } 
+
+  else if(type == "join_queue"){
+    handle_join_queue(client, seq);
+  } 
+
+  else{ //NOT AN OPTION: Error
+    json reply = {
+      {"type","error"},
+      {"seq", seq}
+    };
+    send_JSON_line(client, reply);
+  }
+}
+
+
+
+
+
 
 void handle_client(std::shared_ptr<Client> client){
 
   std::cout << "Client thread started (fd=" << client->fd << ")\n";
 
   std::string pending_parsing;// inside this string all the input from user will be stored
-
   char buffer[1024]; //created a buffer where message is going to be stored
 
   while (true){
@@ -43,6 +135,7 @@ void handle_client(std::shared_ptr<Client> client){
     int bytes = recv(client->fd, buffer, sizeof(buffer), 0);
     
     if (bytes > 0){//chars received
+      
       pending_parsing.append(buffer, bytes); //add input to unparsed input string
       if (pending_parsing.size() > 64 * 1024){break;} //client wll be kicked out if sendind too many chars without enter
 
@@ -55,96 +148,32 @@ void handle_client(std::shared_ptr<Client> client){
         pending_parsing.erase(0, nl_pos+1);
         std::cout << "Received the sentence: " << sentence << "\n";
 
-
-
-
         try{
           json msg = json::parse(sentence);
-
-          std::string type = msg.value("type","");
-          int seq = msg.value("seq", 0);
-          json payload;
-          
-          if(type == "hello"){
-              json reply = {
-                {"type", "helloBack"},
-                {"seq", seq}
-              };
-              std::string output = reply.dump() + "\n"; //dump is a json function that dumps the json into a string format
-              send(client->fd, output.c_str(), output.size(), 0); //send(socket, *buffer, length, flags) where socket is the one who it will be sent and buffer has the message
-          } 
-
-          else if (type == "join_queue"){
-            std::unique_lock<std::mutex> lock(matchmaking_mtx); //lock
-
-//if client already queued: error
-            if (client->inQueue){
-              json reply = {
-                {"type", "error"},
-                {"seq" , seq},
-                {"payload",
-                  {{"code", "ALREADY_QUEUED"}}
-                }
-              };
-              std::string output = reply.dump() + "\n";
-              send(client->fd, output.c_str(), output.size(), 0);
-            }
-
-//if not yet queued: queue
-              else{
-                queue.emplace_back(client);
-                client->inQueue = true;
-
-                if(queue.size() < 2){ //just them in queue: send queue status
-                    json reply = {
-                    {"type", "queue_status"},
-                    {"seq", seq},             
-                    {"payload",
-                      {{"queued", true}}
-                    }
-                    };
-                  std::string output = reply.dump() + "\n";
-                  send(client->fd, output.c_str(), output.size(), 0);
-                }
-
-                /*TODO: 
-                If queue size >= 2:
-
-                pop two clients
-
-                create session id
-
-                send match_found to BOTH*/
-               }
-               std::unique_lock<std::mutex> unlock(matchmaking_mtx);
-        }
-
-          else{
-            json reply = {
-              {"type","error"},
-              {"seq", seq}
-            };
-            std::string output = reply.dump() + "\n";
-            send(client->fd, output.c_str(), output.size(), 0);
-          }
+          handle_message(client, msg);
         }
         catch(const json::parse_error& e){
             std::cerr << "Invalid JSON\n";
         }
       }
-
     }
+
     else if (bytes == 0){//recv returns 0 when client is disconnected
       std::cout << "Client disconnected\n";
       break; //client discconected: break loop
     }
+
     else{//recv returns -1 when unsuccesful
       std::cerr << "recv() error\n";
       break;
+    }
   }
-}
   close(client->fd);
 }
+
+
+
+
 
 
 int main(){
